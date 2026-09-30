@@ -1,0 +1,10 @@
+{
+  "name": "NCCT Cooperative Ecosystem",
+  "description": "National Council for Cooperative Training (NCCT) training and employment platform with course management, trainee admissions, and QR attendance.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
