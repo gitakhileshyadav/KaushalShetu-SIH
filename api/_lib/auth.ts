@@ -1,7 +1,15 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { bearerToken, Req } from './reqres';
 
-const SECRET = process.env.SESSION_SECRET || 'insecure-dev-secret-change-me';
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const SECRET = SESSION_SECRET || 'insecure-dev-secret-change-me';
+
+if (!SESSION_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SESSION_SECRET is not set. Refusing to start in production: session tokens would be forgeable.');
+  }
+  console.warn('WARNING: SESSION_SECRET is not set. Using insecure dev fallback — tokens are forgeable. Set SESSION_SECRET (no VITE_ prefix) before deploying.');
+}
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function sign(payload: string): string {
