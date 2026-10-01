@@ -177,7 +177,6 @@ export const MIGRATION_COLUMNS: Record<string, string[]> = {
 };
 
 let schemaReady = false;
-let seedCompleted = false;
 
 async function countOf(client: Client, table: string): Promise<number> {
   const res = await client.execute(`SELECT COUNT(*) as count FROM ${table}`);
@@ -223,31 +222,51 @@ export async function seedIfEmpty(): Promise<void> {
   const client = getClient();
   if (!client) return;
   await ensureSchema();
-  if (seedCompleted) return;
 
-  if ((await countOf(client, 'courses')) === 0) {
-    await insertRecords(client, 'courses', COMPREHENSIVE_COURSES);
-  }
+  try {
+    if ((await countOf(client, 'courses')) === 0) {
+      await insertRecords(client, 'courses', COMPREHENSIVE_COURSES);
+      await insertRecords(client, 'courses', INITIAL_COURSES);
+    }
+  } catch {}
 
-  if ((await countOf(client, 'users')) === 0) {
-    const hashedUsers = INITIAL_USERS.map((u) => ({
-      ...u,
-      password: bcrypt.hashSync(u.password || 'password123', 10),
-    }));
-    await insertRecords(client, 'users', hashedUsers);
-    await insertRecords(client, 'courses', INITIAL_COURSES);
-    await insertRecords(client, 'enrollments', INITIAL_ENROLLMENTS);
-    await insertRecords(client, 'sessions', INITIAL_SESSIONS);
-    await insertRecords(client, 'attendance', INITIAL_ATTENDANCE_LOGS);
-  }
+  try {
+    if ((await countOf(client, 'users')) === 0) {
+      const hashedUsers = INITIAL_USERS.map((u) => ({
+        ...u,
+        password: bcrypt.hashSync(u.password || 'password123', 10),
+      }));
+      await insertRecords(client, 'users', hashedUsers);
+    }
+  } catch {}
 
-  if ((await countOf(client, 'assessments')) === 0) {
-    await insertRecords(client, 'assessments', COMPREHENSIVE_ASSESSMENTS);
-  }
+  try {
+    if ((await countOf(client, 'enrollments')) === 0) {
+      await insertRecords(client, 'enrollments', INITIAL_ENROLLMENTS);
+    }
+  } catch {}
 
-  if ((await countOf(client, 'submissions')) === 0) {
-    await insertRecords(client, 'submissions', INITIAL_SUBMISSIONS);
-  }
+  try {
+    if ((await countOf(client, 'sessions')) === 0) {
+      await insertRecords(client, 'sessions', INITIAL_SESSIONS);
+    }
+  } catch {}
 
-  seedCompleted = true;
+  try {
+    if ((await countOf(client, 'attendance_logs')) === 0) {
+      await insertRecords(client, 'attendance', INITIAL_ATTENDANCE_LOGS);
+    }
+  } catch {}
+
+  try {
+    if ((await countOf(client, 'assessments')) === 0) {
+      await insertRecords(client, 'assessments', COMPREHENSIVE_ASSESSMENTS);
+    }
+  } catch {}
+
+  try {
+    if ((await countOf(client, 'submissions')) === 0) {
+      await insertRecords(client, 'submissions', INITIAL_SUBMISSIONS);
+    }
+  } catch {}
 }
