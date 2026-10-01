@@ -70,12 +70,13 @@ export interface UserProfile {
   rejectionReason?: string;
 }
 
+export type ConnectionStatus = 'connected' | 'connecting' | 'offline' | 'error' | 'syncing';
+
 export interface TursoConfig {
-  url: string;
-  authToken: string;
-  status: 'connected' | 'offline_local' | 'connecting' | 'error';
+  status: ConnectionStatus;
   lastSyncedAt?: string;
   errorMsg?: string;
+  pendingWrites?: number;
 }
 
 export interface PDFChapter {
@@ -189,6 +190,7 @@ export interface Course {
   approvedBy?: string;
   notes?: string;
   resources?: CourseResourceItem[];
+  offlineDownloadEnabled?: boolean;
 }
 
 export interface Enrollment {
