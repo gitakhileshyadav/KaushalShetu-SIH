@@ -4,6 +4,8 @@ import { ENTITIES, EntityConfig } from '../_lib/entities';
 import { getAuthUserId } from '../_lib/auth';
 import { json, Req, Res } from '../_lib/reqres';
 
+const SENSITIVE_ENTITIES: ReadonlySet<string> = new Set(['qr_tokens']);
+
 function readBody(req: Req): any {
   if (typeof req.body === 'string') {
     try {
@@ -45,6 +47,13 @@ export default async function handler(req: Req, res: Res) {
   const client = getClient()!;
 
   if (req.method === 'GET') {
+    if (SENSITIVE_ENTITIES.has(name)) {
+      const userId = getAuthUserId(req);
+      if (!userId) {
+        json(res, 401, { error: 'Unauthorized' });
+        return;
+      }
+    }
     try {
       const result = await client.execute(`SELECT * FROM ${cfg.table}`);
       json(res, 200, { rows: result.rows.map(cfg.toRow) });
