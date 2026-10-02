@@ -8,12 +8,12 @@ import {
   INITIAL_ENROLLMENTS,
   INITIAL_SESSIONS,
   INITIAL_ATTENDANCE_LOGS,
-} from '../../src/data/initialData';
+} from '../../src/data/initialData.js';
 import {
   COMPREHENSIVE_COURSES,
   COMPREHENSIVE_ASSESSMENTS,
   INITIAL_SUBMISSIONS,
-} from '../../src/data/coursesData';
+} from '../../src/data/coursesData.js';
 
 const BASE_SCHEMA_SQL = [
   `CREATE TABLE IF NOT EXISTS users (

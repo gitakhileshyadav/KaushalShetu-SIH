@@ -1,7 +1,7 @@
-import { dbUnavailable, getClient } from '../_lib/db';
-import { ensureSchema } from '../_lib/schema';
-import { ENTITIES } from '../_lib/entities';
-import { json, Req, Res } from '../_lib/reqres';
+import { dbUnavailable, getClient } from '../_lib/db.js';
+import { ensureSchema } from '../_lib/schema.js';
+import { ENTITIES } from '../_lib/entities.js';
+import { json, Req, Res } from '../_lib/reqres.js';
 
 function readBody(req: Req): any {
   if (typeof req.body === 'string') {
