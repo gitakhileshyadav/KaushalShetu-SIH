@@ -82,6 +82,20 @@ export default async function handler(req: Req, res: Res) {
     const placeholders = cfg.columns.map(() => '?').join(', ');
     const sql = `INSERT OR REPLACE INTO ${cfg.table} (${columns}) VALUES (${placeholders})`;
     for (const rec of records) {
+      if (name === 'users') {
+        // INSERT OR REPLACE rewrites every column: when an incoming record carries no
+        // password (the GET response strips it), preserve the stored hash instead of
+        // nulling it out and bricking that account's login.
+        const incomingPw = rec && typeof rec === 'object' ? (rec as any).password : undefined;
+        if (!incomingPw) {
+          const existingPw = await client.execute({
+            sql: 'SELECT password FROM users WHERE id = ?',
+            args: [(rec as any)?.id]
+          });
+          const stored = existingPw.rows[0]?.password;
+          if (stored != null) (rec as any).password = stored;
+        }
+      }
       await client.execute({ sql, args: cfg.toArgs(rec) });
     }
     json(res, 200, { upserted: records.length });

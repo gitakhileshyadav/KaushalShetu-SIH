@@ -31,15 +31,23 @@ import {
   COMPREHENSIVE_ASSESSMENTS,
   INITIAL_SUBMISSIONS
 } from '../data/coursesData';
-import { 
-  getSavedTursoCredentials, 
-  saveTursoCredentials, 
-  getTursoClient, 
-  testTursoConnection, 
-  initializeTursoSchema, 
-  seedTursoIfEmpty, 
-  runTursoQuery 
-} from '../lib/turso';
+import {
+  fetchAllEntities,
+  upsertEntity,
+  OfflineQueuedError,
+  ApiError,
+  authLogin,
+  authRegister,
+  scanAttendance,
+  healthCheck,
+  initOfflineSync,
+  replayPendingWrites,
+  getPendingWrites,
+  getToken,
+  setToken,
+  EntityName
+} from '../lib/api';
+import bcrypt from 'bcryptjs';
 import confetti from 'canvas-confetti';
 
 interface AppContextType {
@@ -53,7 +61,7 @@ interface AppContextType {
   currentUser: UserProfile | null;
   isAuthenticated: boolean;
   allUsers: UserProfile[];
-  signIn: (username: string, password: string) => { success: boolean; message: string; user?: UserProfile };
+  signIn: (username: string, password: string) => Promise<{ success: boolean; message: string; user?: UserProfile }>;
   signUp: (data: {
     username: string;
     password: string;
@@ -67,7 +75,7 @@ interface AppContextType {
     idProofType?: string;
     idProofNumber?: string;
     applicationReason?: string;
-  }) => { success: boolean; message: string; user?: UserProfile };
+  }) => Promise<{ success: boolean; message: string; user?: UserProfile }>;
   signOut: () => void;
   switchUser: (userId: string) => void;
   switchRole: (role: UserRole) => void;
@@ -76,12 +84,9 @@ interface AppContextType {
   rejectUserProfile: (userId: string, reason: string) => void;
   updateUserRole: (userId: string, newRole: UserRole) => void;
 
-  // Database & Turso
+  // Server Sync Status
   tursoConfig: TursoConfig;
-  connectTurso: (url: string, authToken: string) => Promise<{ success: boolean; message: string; latencyMs?: number }>;
-  disconnectTurso: () => void;
-  syncLocalWithTurso: () => Promise<{ success: boolean; message: string }>;
-  runCustomQuery: (sql: string) => Promise<{ columns: string[]; rows: any[]; affectedRows?: number; error?: string }>;
+  syncNow: () => Promise<{ success: boolean; message: string }>;
 
   // Domain Data
   courses: Course[];
@@ -124,13 +129,13 @@ interface AppContextType {
     venue: string;
   }) => CourseSession;
   generateQRToken: (sessionId: string, durationMinutes?: number) => QRAttendanceToken;
-  verifyAndMarkAttendance: (tokenString: string, manualTraineeId?: string) => {
+  verifyAndMarkAttendance: (tokenString: string, manualTraineeId?: string) => Promise<{
     success: boolean;
     message: string;
     session?: CourseSession;
     course?: Course;
     log?: AttendanceLog;
-  };
+  }>;
 
   // Public Verification
   lookupVerificationRecord: (tokenOrCode: string) => {
@@ -194,8 +199,59 @@ interface AppContextType {
 }
 
 const STORAGE_KEY = 'ncct_coop_ecosystem_v1';
+const PENDING_SCANS_KEY = 'ncct_pending_scans';
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
+
+// Shared course-state builder: merges server/local rows with the COMPREHENSIVE_COURSES
+// catalog and guarantees default approval for initial + core curriculum courses.
+// Used by BOTH the initial state initializer and refreshFromServer().
+function buildCourses(saved: Course[] | null): Course[] {
+  let merged = [...INITIAL_COURSES, ...COMPREHENSIVE_COURSES];
+  if (saved) {
+    try {
+      const parsed: Course[] = saved;
+      merged = [...parsed];
+      COMPREHENSIVE_COURSES.forEach(cc => {
+        const idx = merged.findIndex(m => m.id === cc.id);
+        if (idx === -1) {
+          merged.push(cc);
+        } else if (!merged[idx].modules || merged[idx].modules?.length === 0) {
+          merged[idx] = { ...merged[idx], ...cc };
+        }
+      });
+    } catch (e) {
+      // fallback
+    }
+  }
+  // Ensure all standard initial and catalog courses are accredited & approved by default
+  merged = merged.map(c => {
+    if (!c.approvalStatus) {
+      return { ...c, approvalStatus: 'approved' };
+    }
+    return c;
+  });
+
+  // Explicitly guarantee all core curriculum courses are approved and visible to all trainees
+  const coreCourseIds = [
+    'crs_pacs_101', 
+    'crs_dairy_202', 
+    'crs_finance_303', 
+    'crs_fisheries_404', 
+    'crs_solar_606', 
+    'crs_gov_501', 
+    'crs_poultry_101', 
+    'crs_electrician_201'
+  ];
+  merged = merged.map(c => {
+    if (coreCourseIds.includes(c.id)) {
+      return { ...c, approvalStatus: 'approved' };
+    }
+    return c;
+  });
+
+  return merged;
+}
 
 // Helper to parse route from URL hash
 function getPageFromHash(): { page: AppPage; query?: string } {
@@ -251,15 +307,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentPage, setCurrentPageState] = useState<AppPage>(() => getPageFromHash().page);
   const [verificationQueryCode, setVerificationQueryCode] = useState<string>(() => getPageFromHash().query || '');
 
-  // Turso Database Config State
-  const [tursoConfig, setTursoConfig] = useState<TursoConfig>(() => {
-    const creds = getSavedTursoCredentials();
-    return {
-      url: creds.url,
-      authToken: creds.authToken,
-      status: creds.url ? 'connecting' : 'offline_local'
-    };
-  });
+  // Server Sync Config State (new shape: status/lastSyncedAt/errorMsg/pendingWrites)
+  const [tursoConfig, setTursoConfig] = useState<TursoConfig>(() => ({ status: 'connecting' }));
 
   // State initialization from localStorage with initial fallback
   const [allUsers, setAllUsers] = useState<UserProfile[]>(() => {
@@ -286,50 +335,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [courses, setCourses] = useState<Course[]>(() => {
     const saved = localStorage.getItem(`${STORAGE_KEY}_courses`);
-    let merged = [...INITIAL_COURSES, ...COMPREHENSIVE_COURSES];
+    let parsed: Course[] | null = null;
     if (saved) {
       try {
-        const parsed: Course[] = JSON.parse(saved);
-        merged = [...parsed];
-        COMPREHENSIVE_COURSES.forEach(cc => {
-          const idx = merged.findIndex(m => m.id === cc.id);
-          if (idx === -1) {
-            merged.push(cc);
-          } else if (!merged[idx].modules || merged[idx].modules?.length === 0) {
-            merged[idx] = { ...merged[idx], ...cc };
-          }
-        });
+        parsed = JSON.parse(saved);
       } catch (e) {
-        // fallback
+        parsed = null;
       }
     }
-    // Ensure all standard initial and catalog courses are accredited & approved by default
-    merged = merged.map(c => {
-      if (!c.approvalStatus) {
-        return { ...c, approvalStatus: 'approved' };
-      }
-      return c;
-    });
-
-    // Explicitly guarantee all core curriculum courses are approved and visible to all trainees
-    const coreCourseIds = [
-      'crs_pacs_101', 
-      'crs_dairy_202', 
-      'crs_finance_303', 
-      'crs_fisheries_404', 
-      'crs_solar_606', 
-      'crs_gov_501', 
-      'crs_poultry_101', 
-      'crs_electrician_201'
-    ];
-    merged = merged.map(c => {
-      if (coreCourseIds.includes(c.id)) {
-        return { ...c, approvalStatus: 'approved' };
-      }
-      return c;
-    });
-
-    return merged;
+    return buildCourses(parsed);
   });
 
   const [enrollments, setEnrollments] = useState<Enrollment[]>(() => {
@@ -542,212 +556,300 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(`${STORAGE_KEY}_progress`, JSON.stringify(lessonProgress));
   }, [lessonProgress]);
 
-  // Turso initialization & connection check on mount
-  useEffect(() => {
-    let isMounted = true;
-    const initTurso = async () => {
-      const creds = getSavedTursoCredentials();
-      if (!creds.url) {
-        if (isMounted) {
-          setTursoConfig(prev => ({ ...prev, status: 'offline_local' }));
-        }
-        return;
-      }
+  // ===== Server-primary data flow =====
 
-      try {
-        if (isMounted) setTursoConfig(prev => ({ ...prev, status: 'connecting' }));
-        const testRes = await testTursoConnection(creds.url, creds.authToken);
-        if (testRes.success) {
-          // Schema initialize & seed if empty
-          await initializeTursoSchema();
-          await seedTursoIfEmpty();
-          if (isMounted) {
-            setTursoConfig({
-              url: creds.url,
-              authToken: creds.authToken,
-              status: 'connected',
-              lastSyncedAt: new Date().toLocaleTimeString()
-            });
-          }
-        } else {
-          if (isMounted) {
-            setTursoConfig({
-              url: creds.url,
-              authToken: creds.authToken,
-              status: 'error',
-              errorMsg: testRes.error
-            });
-          }
-        }
-      } catch (err: any) {
-        if (isMounted) {
-          setTursoConfig(prev => ({
-            ...prev,
-            status: 'error',
-            errorMsg: err?.message || 'Connection failed'
-          }));
-        }
-      }
-    };
-
-    initTurso();
-    return () => { isMounted = false; };
-  }, []);
-
-  // Sync state into Turso SQLite
-  const syncLocalWithTurso = async (): Promise<{ success: boolean; message: string }> => {
-    const client = getTursoClient();
-    if (!client) {
-      return { success: false, message: 'No Turso credentials configured. Please configure your Turso Database URL and Auth Token.' };
-    }
-
+  // refreshFromServer(): fetch all entities from the backend, replace local state,
+  // mirror into the ${STORAGE_KEY}_* localStorage read-cache, and mark sync status.
+  const refreshFromServer = useCallback(async () => {
     try {
-      await initializeTursoSchema();
+      const snapshot = await fetchAllEntities();
 
-      // Upsert users
-      for (const u of allUsers) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO users (id, username, password, full_name, email, mobile_number, role, institute, avatar_url, joined_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          args: [u.id, u.username, u.password || 'password123', u.fullName, u.email, u.mobileNumber, u.role, u.institute, u.avatarUrl || '', u.joinedDate]
-        });
+      setAllUsers(snapshot.users);
+      const mergedCourses = buildCourses(snapshot.courses);
+      setCourses(mergedCourses);
+      setEnrollments(snapshot.enrollments);
+      setSessions(snapshot.sessions);
+
+      // qrTokens array -> Record keyed by sessionId, latest createdAt wins.
+      // If the server returned no tokens (empty or unauthorized), keep the current
+      // tokens (demo token / locally generated) so the live demo keeps working.
+      const tokensRecord: Record<string, QRAttendanceToken> = {};
+      snapshot.qrTokens.forEach(t => {
+        const existing = tokensRecord[t.sessionId];
+        if (!existing || new Date(t.createdAt) > new Date(existing.createdAt)) {
+          tokensRecord[t.sessionId] = t;
+        }
+      });
+      const hasTokens = snapshot.qrTokens.length > 0;
+      if (hasTokens) {
+        setActiveTokens(tokensRecord);
       }
 
-      // Upsert courses
-      for (const c of courses) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO courses (id, trainer_id, trainer_name, title, code, category, description, min_pass_pct, min_attendance_pct, institute, created_at, total_sessions_expected)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          args: [c.id, c.trainerId, c.trainerName, c.title, c.code, c.category, c.description, c.minPassPct, c.minAttendancePct, c.institute, c.createdAt, c.totalSessionsExpected]
-        });
-      }
+      setAttendanceLogs(snapshot.attendance);
+      setAssessments(snapshot.assessments);
+      setSubmissions(snapshot.submissions);
+      setLessonProgress(snapshot.progress);
+      setJobPostings(snapshot.jobs);
+      setJobApplications(snapshot.applications);
 
-      // Upsert enrollments
-      for (const e of enrollments) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO enrollments (id, course_id, trainee_id, trainee_name, trainee_email, trainee_mobile, status, requested_at, decided_at, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          args: [e.id, e.courseId, e.traineeId, e.traineeName, e.traineeEmail, e.traineeMobile, e.status, e.requestedAt, e.decidedAt || null, e.notes || '']
-        });
-      }
-
-      // Upsert sessions
-      for (const s of sessions) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO sessions (id, course_id, course_title, topic, session_date, start_time, end_time, venue, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          args: [s.id, s.courseId, s.courseTitle, s.topic, s.sessionDate, s.startTime, s.endTime, s.venue, s.status, s.createdAt]
-        });
-      }
-
-      // Upsert active tokens
-      const tokenList = Object.values(activeTokens) as QRAttendanceToken[];
-      for (const t of tokenList) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO qr_tokens (id, session_id, course_id, token, expires_at, is_active, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?);`,
-          args: [t.id, t.sessionId, t.courseId, t.token, t.expiresAt, t.isActive ? 1 : 0, t.createdAt]
-        });
-      }
-
-      // Upsert attendance logs
-      for (const a of attendanceLogs) {
-        await client.execute({
-          sql: `INSERT OR REPLACE INTO attendance_logs (id, session_id, course_id, trainee_id, trainee_name, scanned_at, ip_address, verified, method)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          args: [a.id, a.sessionId, a.courseId, a.traineeId, a.traineeName, a.scannedAt, a.ipAddress, a.verified ? 1 : 0, a.method]
-        });
+      // Mirror into the localStorage read-cache (PWA offline support)
+      try {
+        localStorage.setItem(`${STORAGE_KEY}_users`, JSON.stringify(snapshot.users));
+        localStorage.setItem(`${STORAGE_KEY}_courses`, JSON.stringify(mergedCourses));
+        localStorage.setItem(`${STORAGE_KEY}_enrollments`, JSON.stringify(snapshot.enrollments));
+        localStorage.setItem(`${STORAGE_KEY}_sessions`, JSON.stringify(snapshot.sessions));
+        if (hasTokens) {
+          localStorage.setItem(`${STORAGE_KEY}_tokens`, JSON.stringify(tokensRecord));
+        }
+        localStorage.setItem(`${STORAGE_KEY}_attendance`, JSON.stringify(snapshot.attendance));
+        localStorage.setItem(`${STORAGE_KEY}_assessments`, JSON.stringify(snapshot.assessments));
+        localStorage.setItem(`${STORAGE_KEY}_submissions`, JSON.stringify(snapshot.submissions));
+        localStorage.setItem(`${STORAGE_KEY}_progress`, JSON.stringify(snapshot.progress));
+        localStorage.setItem(`${STORAGE_KEY}_job_postings`, JSON.stringify(snapshot.jobs));
+        localStorage.setItem(`${STORAGE_KEY}_job_applications`, JSON.stringify(snapshot.applications));
+      } catch {
+        // ignore cache write failures
       }
 
       setTursoConfig(prev => ({
         ...prev,
         status: 'connected',
-        lastSyncedAt: new Date().toLocaleTimeString()
+        lastSyncedAt: new Date().toLocaleTimeString(),
+        errorMsg: undefined
       }));
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setTursoConfig(prev => ({ ...prev, status: 'error', errorMsg: err.message }));
+      } else {
+        setTursoConfig(prev => ({ ...prev, status: 'offline' }));
+      }
+      // State stays as cached — no data loss.
+    }
+  }, []);
 
-      return { success: true, message: 'All local records successfully synchronized to Turso SQLite database!' };
+  // persist(entity, records): the caller has already applied the optimistic local
+  // update; this pushes the record(s) to the backend, queueing when offline.
+  const persist = useCallback((entity: EntityName, records: any[]) => {
+    upsertEntity(entity, records).catch((err) => {
+      if (err instanceof OfflineQueuedError) {
+        setTursoConfig(prev => ({ ...prev, pendingWrites: getPendingWrites() }));
+      } else {
+        console.warn(`[AppContext] Failed to persist ${entity}:`, err);
+      }
+    });
+  }, []);
+
+  // Offline scan queue: scans made while offline are stored here and replayed
+  // (POSTed to /api/attendance/scan) when connectivity returns. Deliberately NOT
+  // stored via enqueueWrite — replayPendingWrites targets /api/data/[entity],
+  // which would 404 for scans and dead-letter them.
+  const queuePendingScan = useCallback((token: string, traineeId?: string, method?: string) => {
+    try {
+      const raw = localStorage.getItem(PENDING_SCANS_KEY);
+      const queue: { token: string; traineeId?: string; method?: string; queuedAt: string }[] = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(queue)) {
+        queue.push({ token, traineeId, method, queuedAt: new Date().toISOString() });
+        localStorage.setItem(PENDING_SCANS_KEY, JSON.stringify(queue));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const readPendingScans = (): { token: string; traineeId?: string; method?: string; queuedAt: string }[] => {
+    try {
+      const raw = localStorage.getItem(PENDING_SCANS_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const replayPendingScans = useCallback(async (): Promise<number> => {
+    const queue = readPendingScans();
+    if (queue.length === 0) return 0;
+    const remaining: { token: string; traineeId?: string; method?: string; queuedAt: string }[] = [];
+    let replayed = 0;
+    for (const item of queue) {
+      try {
+        const res = await scanAttendance(item.token, item.traineeId, item.method as 'web_qr_scan' | 'manual_token' | undefined);
+        if (res.success && res.log) {
+          replayed += 1;
+          const log = res.log;
+          setAttendanceLogs(prev => (prev.some(l => l.id === log.id) ? prev : [log, ...prev]));
+        }
+        // success:false = scan was validated and rejected at replay time — drop it (spec §7)
+      } catch {
+        // Still offline — keep the scan queued
+        remaining.push(item);
+      }
+    }
+    try {
+      if (remaining.length === 0) {
+        localStorage.removeItem(PENDING_SCANS_KEY);
+      } else {
+        localStorage.setItem(PENDING_SCANS_KEY, JSON.stringify(remaining));
+      }
+    } catch {
+      // ignore
+    }
+    return replayed;
+  }, []);
+
+  const syncNow = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+    setTursoConfig(prev => ({ ...prev, status: 'syncing' }));
+    try {
+      const writesReplayed = await replayPendingWrites();
+      const scansReplayed = await replayPendingScans();
+      await refreshFromServer();
+      setTursoConfig(prev => ({ ...prev, pendingWrites: getPendingWrites() }));
+      const parts: string[] = [];
+      if (writesReplayed > 0) parts.push(`${writesReplayed} pending write${writesReplayed === 1 ? '' : 's'} synced`);
+      if (scansReplayed > 0) parts.push(`${scansReplayed} offline scan${scansReplayed === 1 ? '' : 's'} verified`);
+      return {
+        success: true,
+        message: parts.length > 0
+          ? `Sync complete: ${parts.join(', ')}.`
+          : 'You are up to date. All records are synced with the NCCT server.'
+      };
     } catch (err: any) {
-      console.error('Turso sync error:', err);
-      return { success: false, message: err?.message || 'Synchronization failed.' };
+      setTursoConfig(prev => ({ ...prev, status: 'offline', errorMsg: err?.message || 'Sync failed' }));
+      return {
+        success: false,
+        message: 'Sync failed. You appear to be offline. Your changes are saved locally and will sync automatically when you reconnect.'
+      };
     }
-  };
+  }, [refreshFromServer, replayPendingScans]);
 
-  const connectTurso = async (url: string, authToken: string): Promise<{ success: boolean; message: string; latencyMs?: number }> => {
-    setTursoConfig(prev => ({ ...prev, status: 'connecting', errorMsg: undefined }));
-    const test = await testTursoConnection(url, authToken);
-    if (!test.success) {
-      setTursoConfig(prev => ({
-        ...prev,
-        status: 'error',
-        errorMsg: test.error
-      }));
-      return { success: false, message: test.error || 'Connection failed' };
-    }
+  // Mount: initialize the offline sync listener, refresh from the server, and run
+  // a health check. Status flows 'connecting' -> 'connected' | 'offline'.
+  useEffect(() => {
+    let isMounted = true;
 
-    saveTursoCredentials(url, authToken);
-    await initializeTursoSchema();
-    await syncLocalWithTurso();
+    const init = async () => {
+      try {
+        const health = await healthCheck();
+        if (!isMounted) return;
+        if (!health.connected) {
+          setTursoConfig(prev => ({ ...prev, status: 'offline' }));
+        }
+      } catch {
+        if (isMounted) setTursoConfig(prev => ({ ...prev, status: 'offline' }));
+      }
+    };
 
-    setTursoConfig({
-      url,
-      authToken,
-      status: 'connected',
-      lastSyncedAt: new Date().toLocaleTimeString()
+    setTursoConfig(prev => ({ ...prev, pendingWrites: getPendingWrites() }));
+    init();
+    refreshFromServer();
+
+    const cleanupSync = initOfflineSync(() => {
+      replayPendingScans().finally(() => {
+        refreshFromServer();
+      });
     });
 
-    return { success: true, message: 'Connected to Turso SQLite cloud database successfully!', latencyMs: test.latencyMs };
-  };
-
-  const disconnectTurso = () => {
-    saveTursoCredentials('', '');
-    setTursoConfig({
-      url: '',
-      authToken: '',
-      status: 'offline_local'
-    });
-  };
-
-  const runCustomQuery = async (sql: string) => {
-    return await runTursoQuery(sql);
-  };
+    return () => {
+      isMounted = false;
+      cleanupSync();
+    };
+  }, [refreshFromServer, replayPendingScans]);
 
   // Current authenticated user
   const currentUser: UserProfile | null = allUsers.find(u => u.id === currentUserId) || null;
   const isAuthenticated = currentUser !== null;
 
-  // Sign in using Username and Password ONLY
-  const signIn = (username: string, password: string): { success: boolean; message: string; user?: UserProfile } => {
+  // Sign in via the backend auth endpoint, with an offline fallback that verifies
+  // against the cached user hash using bcryptjs (offline convenience mode).
+  const signIn = async (username: string, password: string): Promise<{ success: boolean; message: string; user?: UserProfile }> => {
     const trimmedUser = username.trim().toLowerCase();
-    const foundUser = allUsers.find(
-      u => u.username.toLowerCase() === trimmedUser && (u.password === password || (!u.password && password === 'password123'))
-    );
 
-    if (!foundUser) {
+    try {
+      const res = await authLogin(trimmedUser, password);
+      setToken(res.token);
+      setCurrentUserId(res.user.id);
+      // Merge the fresh server user into local state so the UI reflects it immediately
+      setAllUsers(prev => {
+        const exists = prev.some(u => u.id === res.user.id);
+        if (exists) {
+          return prev.map(u => (u.id === res.user.id ? { ...u, ...res.user } : u));
+        }
+        return [res.user, ...prev];
+      });
+
       return {
-        success: false,
-        message: 'Invalid username or password. Please verify your credentials or use the quick test logins below.'
+        success: true,
+        message: res.user.status === 'pending_approval'
+          ? `Signed in as ${res.user.fullName}. Your registration profile is currently pending NCCT Admin approval.`
+          : `Welcome back, ${res.user.fullName}! Signed in successfully.`,
+        user: res.user
+      };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          return {
+            success: false,
+            message: 'Invalid username or password. Please verify your credentials or use the quick test logins below.'
+          };
+        }
+        if (err.status === 403) {
+          return {
+            success: false,
+            message: err.message || 'Your account registration was not approved by NCCT Administration. Please contact the institute administrator.'
+          };
+        }
+        return {
+          success: false,
+          message: err.message || 'Sign in failed. Please try again.'
+        };
+      }
+
+      // Network failure (offline) — verify against the cached users hash
+      let cachedUsers: UserProfile[] = [];
+      try {
+        const raw = localStorage.getItem(`${STORAGE_KEY}_users`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) cachedUsers = parsed as UserProfile[];
+        }
+      } catch {
+        cachedUsers = [];
+      }
+
+      const verifyCachedPassword = (plain: string, stored: string | undefined): boolean => {
+        if (!stored) return false;
+        try {
+          return bcrypt.compareSync(plain, stored);
+        } catch {
+          // Stored value is not a valid bcrypt hash (e.g. plaintext) — direct comparison
+          return stored === plain;
+        }
+      };
+
+      const foundUser = cachedUsers.find(
+        u => u && typeof u.username === 'string' && u.username.toLowerCase() === trimmedUser && verifyCachedPassword(password, u.password)
+      );
+
+      if (!foundUser) {
+        return {
+          success: false,
+          message: 'You appear to be offline and no matching saved account was found on this device. Please reconnect to sign in.'
+        };
+      }
+
+      setCurrentUserId(foundUser.id);
+      return {
+        success: true,
+        message: `Offline mode: signed in with saved credentials as ${foundUser.fullName}. Data will sync when you reconnect.`,
+        user: foundUser
       };
     }
-
-    if (foundUser.status === 'rejected') {
-      return {
-        success: false,
-        message: `Your account registration was not approved by NCCT Administration. ${foundUser.rejectionReason ? `Reason: ${foundUser.rejectionReason}` : 'Please contact the institute administrator.'}`
-      };
-    }
-
-    setCurrentUserId(foundUser.id);
-    return {
-      success: true,
-      message: foundUser.status === 'pending_approval' 
-        ? `Signed in as ${foundUser.fullName}. Your registration profile is currently pending NCCT Admin approval.`
-        : `Welcome back, ${foundUser.fullName}! Signed in successfully.`,
-      user: foundUser
-    };
   };
 
-  // Sign up using Username and Password ONLY with Admin Approval workflow
-  const signUp = (data: {
+  // Sign up via the backend register endpoint (server inserts the user), with an
+  // offline fallback that creates the user locally and queues it for sync.
+  const signUp = async (data: {
     username: string;
     password: string;
     fullName: string;
@@ -760,60 +862,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     idProofType?: string;
     idProofNumber?: string;
     applicationReason?: string;
-  }): { success: boolean; message: string; user?: UserProfile } => {
+  }): Promise<{ success: boolean; message: string; user?: UserProfile }> => {
     const trimmedUser = data.username.trim().toLowerCase();
 
     if (!trimmedUser || !data.password) {
       return { success: false, message: 'Username and password are required.' };
     }
 
-    if (allUsers.some(u => u.username.toLowerCase() === trimmedUser)) {
-      return { success: false, message: `Username "${data.username}" is already taken. Please choose another.` };
+    try {
+      const res = await authRegister({ ...data, username: trimmedUser });
+      const user = res.user;
+      setCurrentUserId(user.id);
+      setAllUsers(prev => (prev.some(u => u.id === user.id) ? prev : [user, ...prev]));
+
+      return {
+        success: true,
+        message: user.status === 'approved'
+          ? `Administrator profile created and verified.`
+          : `Registration profile submitted successfully! Your account is submitted for NCCT Admin Approval.`,
+        user
+      };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        return {
+          success: false,
+          message: err.message || 'Registration failed. Please try again.'
+        };
+      }
+
+      // Network failure (offline) — create the user locally with the same defaults
+      // as before and queue it for server sync.
+      if (allUsers.some(u => u.username.toLowerCase() === trimmedUser)) {
+        return { success: false, message: `Username "${data.username}" is already taken. Please choose another.` };
+      }
+
+      // Role-based approval policy: Admins are auto-approved, while Trainee, Trainer, and Employer require Apex Admin approval
+      const isApexAdmin = data.role === 'admin';
+
+      const newUser: UserProfile = {
+        id: `usr_${data.role}_${Date.now()}`,
+        username: trimmedUser,
+        password: data.password,
+        fullName: data.fullName.trim() || data.username,
+        email: data.email?.trim() || `${trimmedUser}@coop-ncct.in`,
+        mobileNumber: data.mobileNumber.trim() || '+91 90000 00000',
+        role: data.role,
+        institute: data.institute.trim() || 'NCCT Cooperative Institution',
+        joinedDate: new Date().toISOString().split('T')[0],
+        status: isApexAdmin ? 'approved' : 'pending_approval',
+        designation: data.designation?.trim() || (data.role === 'trainer' ? 'Certified Faculty Candidate' : data.role === 'trainee' ? 'Vocational Trainee' : 'Recruitment Officer'),
+        qualification: data.qualification?.trim(),
+        idProofType: data.idProofType?.trim() || 'Aadhaar / National ID',
+        idProofNumber: data.idProofNumber?.trim(),
+        applicationReason: data.applicationReason?.trim(),
+        approvedAt: isApexAdmin ? new Date().toISOString() : undefined,
+        approvedBy: isApexAdmin ? 'NCCT Apex Directorate' : undefined
+      };
+
+      setAllUsers(prev => [newUser, ...prev]);
+      setCurrentUserId(newUser.id);
+      persist('users', [newUser]);
+
+      return {
+        success: true,
+        message: isApexAdmin
+          ? `Offline mode: Administrator profile created on this device and will sync when you reconnect.`
+          : `Offline mode: Registration profile saved on this device and queued for NCCT Admin Approval when you reconnect.`,
+        user: newUser
+      };
     }
-
-    // Role-based approval policy: Admins are auto-approved, while Trainee, Trainer, and Employer require Apex Admin approval
-    const isApexAdmin = data.role === 'admin';
-
-    const newUser: UserProfile = {
-      id: `usr_${data.role}_${Date.now()}`,
-      username: trimmedUser,
-      password: data.password,
-      fullName: data.fullName.trim() || data.username,
-      email: data.email?.trim() || `${trimmedUser}@coop-ncct.in`,
-      mobileNumber: data.mobileNumber.trim() || '+91 90000 00000',
-      role: data.role,
-      institute: data.institute.trim() || 'NCCT Cooperative Institution',
-      joinedDate: new Date().toISOString().split('T')[0],
-      status: isApexAdmin ? 'approved' : 'pending_approval',
-      designation: data.designation?.trim() || (data.role === 'trainer' ? 'Certified Faculty Candidate' : data.role === 'trainee' ? 'Vocational Trainee' : 'Recruitment Officer'),
-      qualification: data.qualification?.trim(),
-      idProofType: data.idProofType?.trim() || 'Aadhaar / National ID',
-      idProofNumber: data.idProofNumber?.trim(),
-      applicationReason: data.applicationReason?.trim(),
-      approvedAt: isApexAdmin ? new Date().toISOString() : undefined,
-      approvedBy: isApexAdmin ? 'NCCT Apex Directorate' : undefined
-    };
-
-    setAllUsers(prev => [newUser, ...prev]);
-    setCurrentUserId(newUser.id);
-
-    // Asynchronously write to Turso if connected
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT OR REPLACE INTO users (id, username, password, full_name, email, mobile_number, role, institute, avatar_url, joined_date)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        args: [newUser.id, newUser.username, newUser.password, newUser.fullName, newUser.email, newUser.mobileNumber, newUser.role, newUser.institute, '', newUser.joinedDate]
-      }).catch(err => console.warn('Background Turso insert failed:', err));
-    }
-
-    return {
-      success: true,
-      message: isApexAdmin
-        ? `Administrator profile created and verified.`
-        : `Registration profile submitted successfully! Your account is submitted for NCCT Admin Approval.`,
-      user: newUser
-    };
   };
 
   const signOut = () => {
@@ -839,48 +956,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) return;
     const updated = { ...currentUser, ...data };
     setAllUsers(prev => prev.map(u => u.id === currentUser.id ? updated : u));
-
-    // Turso update
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `UPDATE users SET full_name = ?, mobile_number = ?, institute = ? WHERE id = ?;`,
-        args: [updated.fullName, updated.mobileNumber, updated.institute, updated.id]
-      }).catch(err => console.warn('Background Turso user update failed:', err));
-    }
+    persist('users', [updated]);
   };
 
   // Admin user approvals
   const approveUserProfile = (userId: string, adminRemarks?: string) => {
-    setAllUsers(prev => prev.map(u => {
-      if (u.id === userId) {
-        return {
-          ...u,
-          status: 'approved',
-          approvedAt: new Date().toISOString(),
-          approvedBy: currentUser?.fullName || 'Director K. N. Rao',
-          rejectionReason: undefined
-        };
-      }
-      return u;
-    }));
+    const target = allUsers.find(u => u.id === userId);
+    if (!target) return;
+    const updated: UserProfile = {
+      ...target,
+      status: 'approved',
+      approvedAt: new Date().toISOString(),
+      approvedBy: currentUser?.fullName || 'Director K. N. Rao',
+      rejectionReason: undefined
+    };
+    setAllUsers(prev => prev.map(u => u.id === userId ? updated : u));
+    persist('users', [updated]);
   };
 
   const rejectUserProfile = (userId: string, reason: string) => {
-    setAllUsers(prev => prev.map(u => {
-      if (u.id === userId) {
-        return {
-          ...u,
-          status: 'rejected',
-          rejectionReason: reason || 'Application details did not satisfy NCCT affiliation criteria.'
-        };
-      }
-      return u;
-    }));
+    const target = allUsers.find(u => u.id === userId);
+    if (!target) return;
+    const updated: UserProfile = {
+      ...target,
+      status: 'rejected',
+      rejectionReason: reason || 'Application details did not satisfy NCCT affiliation criteria.'
+    };
+    setAllUsers(prev => prev.map(u => u.id === userId ? updated : u));
+    persist('users', [updated]);
   };
 
   const updateUserRole = (userId: string, newRole: UserRole) => {
-    setAllUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
+    const target = allUsers.find(u => u.id === userId);
+    if (!target) return;
+    const updated: UserProfile = { ...target, role: newRole };
+    setAllUsers(prev => prev.map(u => u.id === userId ? updated : u));
+    persist('users', [updated]);
   };
 
   // 1. Create Course with Admin Approval Status
@@ -917,22 +1028,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setCourses(prev => [newCourse, ...prev]);
-
-    // Turso insert
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT INTO courses (id, trainer_id, trainer_name, title, code, category, description, min_pass_pct, min_attendance_pct, institute, created_at, total_sessions_expected)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        args: [newCourse.id, newCourse.trainerId, newCourse.trainerName, newCourse.title, newCourse.code, newCourse.category, newCourse.description, newCourse.minPassPct, newCourse.minAttendancePct, newCourse.institute, newCourse.createdAt, newCourse.totalSessionsExpected]
-      }).catch(err => console.warn('Background Turso course insert failed:', err));
-    }
+    persist('courses', [newCourse]);
 
     return newCourse;
   };
 
   const updateCourse = (id: string, data: Partial<Course>) => {
+    const existing = courses.find(c => c.id === id);
+    const updated = existing ? { ...existing, ...data } : null;
     setCourses(prev => prev.map(c => c.id === id ? { ...c, ...data } : c));
+    if (updated) persist('courses', [updated]);
   };
 
   const deleteCourse = (id: string) => {
@@ -943,35 +1048,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Course Governance & Accreditation
   const approveCourse = (courseId: string, remarks?: string) => {
-    setCourses(prev => prev.map(c => {
-      if (c.id === courseId) {
-        return {
-          ...c,
-          approvalStatus: 'approved',
-          approvedAt: new Date().toISOString(),
-          approvedBy: currentUser?.fullName || 'Director K. N. Rao',
-          adminRemarks: remarks || 'Curriculum approved for National Cooperative Education delivery.'
-        };
-      }
-      return c;
-    }));
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      approvalStatus: 'approved',
+      approvedAt: new Date().toISOString(),
+      approvedBy: currentUser?.fullName || 'Director K. N. Rao',
+      adminRemarks: remarks || 'Curriculum approved for National Cooperative Education delivery.'
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
   };
 
   const rejectCourse = (courseId: string, reason: string) => {
-    setCourses(prev => prev.map(c => {
-      if (c.id === courseId) {
-        return {
-          ...c,
-          approvalStatus: 'rejected',
-          adminRemarks: reason || 'Syllabus requires revisions as per NCCT apex guidelines.'
-        };
-      }
-      return c;
-    }));
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      approvalStatus: 'rejected',
+      adminRemarks: reason || 'Syllabus requires revisions as per NCCT apex guidelines.'
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
   };
 
   const updateCourseNotes = (courseId: string, notes: string) => {
+    const target = courses.find(c => c.id === courseId);
+    const updated = target ? { ...target, notes } : null;
     setCourses(prev => prev.map(c => c.id === courseId ? { ...c, notes } : c));
+    if (updated) persist('courses', [updated]);
   };
 
   const addCourseResource = (courseId: string, resource: { title: string; type: 'pdf' | 'notes' | 'document' | 'video'; url: string; summary?: string }) => {
@@ -983,15 +1089,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       summary: resource.summary,
       uploadedAt: new Date().toISOString().split('T')[0]
     };
-    setCourses(prev => prev.map(c => {
-      if (c.id === courseId) {
-        return {
-          ...c,
-          resources: [...(c.resources || []), newItem]
-        };
-      }
-      return c;
-    }));
+    const target = courses.find(c => c.id === courseId);
+    if (target) {
+      const updated: Course = { ...target, resources: [...(target.resources || []), newItem] };
+      setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+      persist('courses', [updated]);
+    } else {
+      setCourses(prev => prev.map(c => {
+        if (c.id === courseId) {
+          return {
+            ...c,
+            resources: [...(c.resources || []), newItem]
+          };
+        }
+        return c;
+      }));
+    }
   };
 
   const addCourseLesson = (courseId: string, lesson: Omit<CourseLesson, 'id'>) => {
@@ -999,15 +1112,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...lesson,
       id: `mod_${Date.now()}`
     };
-    setCourses(prev => prev.map(c => {
-      if (c.id === courseId) {
-        return {
-          ...c,
-          modules: [...(c.modules || []), newLesson]
-        };
-      }
-      return c;
-    }));
+    const target = courses.find(c => c.id === courseId);
+    if (target) {
+      const updated: Course = { ...target, modules: [...(target.modules || []), newLesson] };
+      setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+      persist('courses', [updated]);
+    } else {
+      setCourses(prev => prev.map(c => {
+        if (c.id === courseId) {
+          return {
+            ...c,
+            modules: [...(c.modules || []), newLesson]
+          };
+        }
+        return c;
+      }));
+    }
   };
 
   // 2. Trainee Admission Requests
@@ -1038,31 +1158,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setEnrollments(prev => [newEnrollment, ...prev]);
-
-    // Turso insert
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT INTO enrollments (id, course_id, trainee_id, trainee_name, trainee_email, trainee_mobile, status, requested_at, notes)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        args: [newEnrollment.id, newEnrollment.courseId, newEnrollment.traineeId, newEnrollment.traineeName, newEnrollment.traineeEmail, newEnrollment.traineeMobile, newEnrollment.status, newEnrollment.requestedAt, newEnrollment.notes]
-      }).catch(err => console.warn('Background Turso enrollment insert failed:', err));
-    }
+    persist('enrollments', [newEnrollment]);
 
     return { success: true, message: `Admission requested for "${course.title}". Awaiting trainer approval.` };
   };
 
   const decideAdmission = (enrollmentId: string, status: 'approved' | 'rejected') => {
     const decidedAt = new Date().toISOString();
+    const target = enrollments.find(e => e.id === enrollmentId);
+    const updated = target ? { ...target, status, decidedAt } : null;
     setEnrollments(prev => prev.map(e => e.id === enrollmentId ? { ...e, status, decidedAt } : e));
-
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `UPDATE enrollments SET status = ?, decided_at = ? WHERE id = ?;`,
-        args: [status, decidedAt, enrollmentId]
-      }).catch(err => console.warn('Background Turso enrollment update failed:', err));
-    }
+    if (updated) persist('enrollments', [updated]);
   };
 
   // 3. Create Session
@@ -1089,15 +1195,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setSessions(prev => [newSession, ...prev]);
-
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT INTO sessions (id, course_id, course_title, topic, session_date, start_time, end_time, venue, status, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        args: [newSession.id, newSession.courseId, newSession.courseTitle, newSession.topic, newSession.sessionDate, newSession.startTime, newSession.endTime, newSession.venue, newSession.status, newSession.createdAt]
-      }).catch(err => console.warn('Background Turso session insert failed:', err));
-    }
+    persist('sessions', [newSession]);
 
     return newSession;
   };
@@ -1125,23 +1223,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       [sessionId]: newToken
     }));
-
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT OR REPLACE INTO qr_tokens (id, session_id, course_id, token, expires_at, is_active, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?);`,
-        args: [newToken.id, newToken.sessionId, newToken.courseId, newToken.token, newToken.expiresAt, 1, newToken.createdAt]
-      }).catch(err => console.warn('Background Turso token insert failed:', err));
-    }
+    persist('qr_tokens', [newToken]);
 
     return newToken;
   };
 
-  // 5. Verification & Attendance Recording
-  const verifyAndMarkAttendance = (tokenString: string, manualTraineeId?: string) => {
-    const trainee = manualTraineeId 
-      ? allUsers.find(u => u.id === manualTraineeId) 
+  // 5. Verification & Attendance Recording — server-validated via /api/attendance/scan
+  const verifyAndMarkAttendance = async (tokenString: string, manualTraineeId?: string) => {
+    const trainee = manualTraineeId
+      ? allUsers.find(u => u.id === manualTraineeId)
       : currentUser;
 
     if (!trainee) {
@@ -1149,119 +1239,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const cleanToken = tokenString.trim();
-    let matchedToken: QRAttendanceToken | undefined = undefined;
-
-    const tokenList = Object.values(activeTokens) as QRAttendanceToken[];
-    for (const tok of tokenList) {
-      if (tok && tok.token === cleanToken) {
-        matchedToken = tok;
-        break;
-      }
-    }
-
-    if (!matchedToken) {
-      return { 
-        success: false, 
-        message: 'Invalid QR Code token. Please scan an active session QR code generated by your trainer.' 
-      };
-    }
-
-    // Expiry check
-    const now = new Date();
-    const expiryDate = new Date(matchedToken.expiresAt);
-    if (now > expiryDate || !matchedToken.isActive) {
-      return { 
-        success: false, 
-        message: 'This QR Code token has expired. Ask your trainer to project a refreshed QR code.' 
-      };
-    }
-
-    const session = sessions.find(s => s.id === matchedToken!.sessionId);
-    if (!session) {
-      return { success: false, message: 'Associated training session could not be found.' };
-    }
-
-    const course = courses.find(c => c.id === session.courseId);
-
-    // Trainee Enrollment Gate
-    const enrollment = enrollments.find(e => e.courseId === session.courseId && e.traineeId === trainee.id);
-
-    if (!enrollment) {
-      return { 
-        success: false, 
-        message: `Attendance rejected: You are not enrolled in "${course?.title || 'this course'}". Request admission first.` 
-      };
-    }
-
-    if (enrollment.status === 'pending_approval') {
-      return { 
-        success: false, 
-        message: `Attendance rejected: Your enrollment in "${course?.title}" is awaiting trainer approval.` 
-      };
-    }
-
-    if (enrollment.status === 'rejected') {
-      return { 
-        success: false, 
-        message: `Attendance rejected: Your enrollment in this course was rejected.` 
-      };
-    }
-
-    // Duplicate Prevention
-    const alreadyLogged = attendanceLogs.find(
-      log => log.sessionId === session.id && log.traineeId === trainee.id
-    );
-
-    if (alreadyLogged) {
-      const timeStr = new Date(alreadyLogged.scannedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      return { 
-        success: false, 
-        message: `Duplicate attendance prevented: You already recorded attendance for this session at ${timeStr}.` 
-      };
-    }
-
-    // Record verified attendance log
-    const newLog: AttendanceLog = {
-      id: `att_log_${Date.now()}`,
-      sessionId: session.id,
-      courseId: session.courseId,
-      traineeId: trainee.id,
-      traineeName: trainee.fullName,
-      scannedAt: new Date().toISOString(),
-      ipAddress: '192.168.1.' + Math.floor(20 + Math.random() * 80),
-      verified: true,
-      method: cleanToken.includes('MANUAL') ? 'manual_token' : 'web_qr_scan'
-    };
-
-    setAttendanceLogs(prev => [newLog, ...prev]);
-
-    // Save to Turso SQLite in background
-    const client = getTursoClient();
-    if (client) {
-      client.execute({
-        sql: `INSERT INTO attendance_logs (id, session_id, course_id, trainee_id, trainee_name, scanned_at, ip_address, verified, method)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-        args: [newLog.id, newLog.sessionId, newLog.courseId, newLog.traineeId, newLog.traineeName, newLog.scannedAt, newLog.ipAddress, 1, newLog.method]
-      }).catch(err => console.warn('Background Turso attendance insert failed:', err));
+    if (!cleanToken) {
+      return { success: false, message: 'Invalid QR Code token. Please scan an active session QR code generated by your trainer.' };
     }
 
     try {
-      confetti({
-        particleCount: 80,
-        spread: 70,
-        origin: { y: 0.6 }
-      });
-    } catch {
-      // ignore
-    }
+      const res = await scanAttendance(cleanToken, trainee.id, cleanToken.includes('MANUAL') ? 'manual_token' : 'web_qr_scan');
 
-    return {
-      success: true,
-      message: `Attendance verified successfully for "${session.topic}"!`,
-      session,
-      course,
-      log: newLog
-    };
+      if (res.success && res.log) {
+        setAttendanceLogs(prev => (prev.some(l => l.id === res.log!.id) ? prev : [res.log!, ...prev]));
+
+        try {
+          confetti({
+            particleCount: 80,
+            spread: 70,
+            origin: { y: 0.6 }
+          });
+        } catch {
+          // ignore
+        }
+
+        return {
+          success: true,
+          message: res.message || `Attendance verified successfully for "${res.session?.topic}"!`,
+          session: res.session,
+          course: res.course ?? undefined,
+          log: res.log
+        };
+      }
+
+      // Server-validated rejection — map reason to the existing user-facing messages
+      const reasonMessages: Record<string, string> = {
+        invalid: 'Invalid QR Code token. Please scan an active session QR code generated by your trainer.',
+        expired: 'This QR Code token has expired. Ask your trainer to project a refreshed QR code.',
+        not_enrolled: 'Attendance rejected: You are not enrolled in this course. Request admission first.',
+        pending: 'Attendance rejected: Your enrollment in this course is awaiting trainer approval.',
+        rejected: 'Attendance rejected: Your enrollment in this course was rejected.',
+        duplicate: res.message || 'Duplicate attendance prevented: You already recorded attendance for this session.'
+      };
+      return {
+        success: false,
+        message: (res.reason && reasonMessages[res.reason]) || res.message || 'Attendance could not be verified.'
+      };
+    } catch (err) {
+      if (err instanceof ApiError) {
+        return { success: false, message: err.message || 'Attendance could not be verified.' };
+      }
+
+      // Network failure (offline) — queue the scan for verification when back online.
+      // Validated at replay time per spec §7.
+      queuePendingScan(cleanToken, trainee.id, cleanToken.includes('MANUAL') ? 'manual_token' : 'web_qr_scan');
+      return {
+        success: false,
+        message: 'You appear to be offline. Your scan has been saved and will be verified when you reconnect.'
+      };
+    }
   };
 
   // Public Verification Lookup
@@ -1339,28 +1371,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const markLessonComplete = useCallback((courseId: string, lessonId: string) => {
     if (!currentUser) return;
+    const completedAt = new Date().toISOString();
+    const existing = lessonProgress.find(p => p.courseId === courseId && p.lessonId === lessonId && p.traineeId === currentUser.id);
+    const entry: LessonProgress = existing
+      ? { ...existing, completed: true, watchedPercentage: 100, completedAt }
+      : { courseId, lessonId, traineeId: currentUser.id, completed: true, watchedPercentage: 100, completedAt };
     setLessonProgress(prev => {
-      const exists = prev.some(p => p.courseId === courseId && p.lessonId === lessonId && p.traineeId === currentUser.id);
-      if (exists) {
-        return prev.map(p => 
+      const existsNow = prev.some(p => p.courseId === courseId && p.lessonId === lessonId && p.traineeId === currentUser.id);
+      if (existsNow) {
+        return prev.map(p =>
           p.courseId === courseId && p.lessonId === lessonId && p.traineeId === currentUser.id
-            ? { ...p, completed: true, watchedPercentage: 100, completedAt: new Date().toISOString() }
+            ? { ...p, completed: true, watchedPercentage: 100, completedAt }
             : p
         );
       }
-      return [
-        ...prev,
-        {
-          courseId,
-          lessonId,
-          traineeId: currentUser.id,
-          completed: true,
-          watchedPercentage: 100,
-          completedAt: new Date().toISOString()
-        }
-      ];
+      return [...prev, entry];
     });
-  }, [currentUser]);
+    persist('progress', [entry]);
+  }, [currentUser, lessonProgress]);
 
   const submitAssessment = useCallback((data: {
     assessmentId: string;
@@ -1399,22 +1427,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const filtered = prev.filter(s => !(s.assessmentId === data.assessmentId && s.traineeId === (currentUser?.id || 'usr_trainee_1')));
       return [newSub, ...filtered];
     });
+    persist('submissions', [newSub]);
 
     return newSub;
   }, [currentUser]);
 
   const approveSubmission = useCallback((subId: string, remarks?: string) => {
-    setSubmissions(prev => prev.map(s => {
-      if (s.id === subId) {
-        return {
-          ...s,
-          trainerApproved: true,
-          trainerRemarks: remarks || 'Approved by certified NCCT trainer.'
-        };
-      }
-      return s;
-    }));
-  }, []);
+    const target = submissions.find(s => s.id === subId);
+    if (target) {
+      const updated: AssessmentSubmission = {
+        ...target,
+        trainerApproved: true,
+        trainerRemarks: remarks || 'Approved by certified NCCT trainer.'
+      };
+      setSubmissions(prev => prev.map(s => s.id === subId ? updated : s));
+      persist('submissions', [updated]);
+    } else {
+      setSubmissions(prev => prev.map(s => {
+        if (s.id === subId) {
+          return {
+            ...s,
+            trainerApproved: true,
+            trainerRemarks: remarks || 'Approved by certified NCCT trainer.'
+          };
+        }
+        return s;
+      }));
+    }
+  }, [submissions]);
 
   const addAssessmentQuestion = useCallback((assessmentId: string, question: Omit<AssessmentQuestion, 'id'>) => {
     const newQ: AssessmentQuestion = {
@@ -1422,16 +1462,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `q_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`
     };
 
-    setAssessments(prev => prev.map(a => {
-      if (a.id === assessmentId) {
-        return {
-          ...a,
-          questions: [...a.questions, newQ]
-        };
-      }
-      return a;
-    }));
-  }, []);
+    const target = assessments.find(a => a.id === assessmentId);
+    if (target) {
+      const updated: CourseAssessment = { ...target, questions: [...target.questions, newQ] };
+      setAssessments(prev => prev.map(a => a.id === assessmentId ? updated : a));
+      persist('assessments', [updated]);
+    } else {
+      setAssessments(prev => prev.map(a => {
+        if (a.id === assessmentId) {
+          return {
+            ...a,
+            questions: [...a.questions, newQ]
+          };
+        }
+        return a;
+      }));
+    }
+  }, [assessments]);
 
   const createJobPosting = (data: {
     title: string;
@@ -1456,6 +1503,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       requiredCategory: data.requiredCategory || 'All Categories'
     };
     setJobPostings(prev => [newJob, ...prev]);
+    persist('jobs', [newJob]);
     return newJob;
   };
 
@@ -1485,11 +1533,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setJobApplications(prev => [newApp, ...prev]);
+    persist('applications', [newApp]);
     return { success: true, message: `Application successfully submitted to ${job.employerName}!` };
   };
 
   const updateJobApplicationStatus = (appId: string, status: 'pending' | 'shortlisted' | 'hired' | 'rejected') => {
+    const target = jobApplications.find(a => a.id === appId);
+    const updated = target ? { ...target, status } : null;
     setJobApplications(prev => prev.map(a => a.id === appId ? { ...a, status } : a));
+    if (updated) persist('applications', [updated]);
   };
 
   const verifyCertificate = (codeOrName: string) => {
@@ -1522,7 +1574,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetAllData = () => {
-    localStorage.clear();
+    // Preserve the session token and pending scan queue; clear everything else
+    const sessionToken = getToken();
+    const pendingScans = (() => {
+      try { return localStorage.getItem(PENDING_SCANS_KEY); } catch { return null; }
+    })();
+    try { localStorage.clear(); } catch {
+      // ignore
+    }
+    if (sessionToken) setToken(sessionToken);
+    if (pendingScans !== null) {
+      try { localStorage.setItem(PENDING_SCANS_KEY, pendingScans); } catch {
+        // ignore
+      }
+    }
+
     setAllUsers(INITIAL_USERS);
     setCurrentUserId('usr_trainer_1');
     setCourses([...INITIAL_COURSES, ...COMPREHENSIVE_COURSES]);
@@ -1532,6 +1598,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAssessments(COMPREHENSIVE_ASSESSMENTS);
     setSubmissions(INITIAL_SUBMISSIONS);
     setLessonProgress([]);
+    setJobPostings([]);
+    setJobApplications([]);
 
     const expiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     setActiveTokens({
@@ -1545,6 +1613,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: new Date().toISOString()
       }
     });
+
+    refreshFromServer();
   };
 
   return (
@@ -1569,10 +1639,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateUserRole,
 
         tursoConfig,
-        connectTurso,
-        disconnectTurso,
-        syncLocalWithTurso,
-        runCustomQuery,
+        syncNow,
 
         courses,
         enrollments,
