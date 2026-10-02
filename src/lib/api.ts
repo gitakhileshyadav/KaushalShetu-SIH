@@ -312,7 +312,11 @@ export async function replayPendingWrites(): Promise<number> {
     const next = queue[0];
     try {
       await rawUpsert(next.entity, next.records);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+        writeQueue(readQueue().slice(1));
+        continue;
+      }
       return replayed;
     }
     writeQueue(readQueue().slice(1));
