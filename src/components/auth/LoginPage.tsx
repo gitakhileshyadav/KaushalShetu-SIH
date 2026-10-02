@@ -25,7 +25,15 @@ export const LoginPage: React.FC = () => {
   const [successMsg, setSuccessMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const navigateAfterAuth = (role?: string) => {
+    if (role === 'trainer') navigateTo('trainer');
+    else if (role === 'trainee') navigateTo('trainee');
+    else if (role === 'admin') navigateTo('admin');
+    else if (role === 'employer') navigateTo('employer');
+    else navigateTo('home');
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setSuccessMsg('');
@@ -36,38 +44,28 @@ export const LoginPage: React.FC = () => {
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      const res = signIn(username, password);
-      setIsLoading(false);
-      if (res.success) {
-        setSuccessMsg(res.message);
-        setTimeout(() => {
-          if (res.user?.role === 'trainer') navigateTo('trainer');
-          else if (res.user?.role === 'trainee') navigateTo('trainee');
-          else if (res.user?.role === 'admin') navigateTo('admin');
-          else if (res.user?.role === 'employer') navigateTo('employer');
-          else navigateTo('home');
-        }, 600);
-      } else {
-        setErrorMsg(res.message);
-      }
-    }, 250);
+    const res = await signIn(username, password);
+    setIsLoading(false);
+    if (res.success) {
+      setSuccessMsg(res.message);
+      setTimeout(() => navigateAfterAuth(res.user?.role), 600);
+    } else {
+      setErrorMsg(res.message);
+    }
   };
 
-  const handleQuickLogin = (u: string, p: string) => {
+  const handleQuickLogin = async (u: string, p: string) => {
     setUsername(u);
     setPassword(p);
     setErrorMsg('');
-    const res = signIn(u, p);
+    setIsLoading(true);
+    const res = await signIn(u, p);
+    setIsLoading(false);
     if (res.success) {
       setSuccessMsg(res.message);
-      setTimeout(() => {
-        if (res.user?.role === 'trainer') navigateTo('trainer');
-        else if (res.user?.role === 'trainee') navigateTo('trainee');
-        else if (res.user?.role === 'admin') navigateTo('admin');
-        else if (res.user?.role === 'employer') navigateTo('employer');
-        else navigateTo('home');
-      }, 500);
+      setTimeout(() => navigateAfterAuth(res.user?.role), 500);
+    } else {
+      setErrorMsg(res.message);
     }
   };
 

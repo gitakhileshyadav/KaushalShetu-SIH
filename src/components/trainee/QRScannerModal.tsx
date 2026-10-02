@@ -91,10 +91,14 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
     }
   };
 
-  const handleTokenSubmitted = (tokenString: string) => {
-    if (!tokenString.trim()) return;
+  const [isVerifying, setIsVerifying] = useState(false);
 
-    const res = verifyAndMarkAttendance(tokenString.trim());
+  const handleTokenSubmitted = async (tokenString: string) => {
+    if (!tokenString.trim() || isVerifying) return;
+
+    setIsVerifying(true);
+    const res = await verifyAndMarkAttendance(tokenString.trim());
+    setIsVerifying(false);
     if (res.success) {
       setScanResult({
         status: 'success',

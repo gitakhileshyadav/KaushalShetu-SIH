@@ -74,12 +74,12 @@ export const QRDisplayPage: React.FC = () => {
   const attendees = currentSession ? getSessionAttendees(currentSession.id) : [];
 
   // Quick simulation helper for testing
-  const simulateScan = () => {
+  const simulateScan = async () => {
     if (!currentToken) return;
     const eligibleTrainees = allUsers.filter(u => u.role === 'trainee');
     const unscanned = eligibleTrainees.find(t => !attendees.some(a => a.traineeId === t.id));
     if (unscanned) {
-      verifyAndMarkAttendance(currentToken.token, unscanned.id);
+      await verifyAndMarkAttendance(currentToken.token, unscanned.id);
     }
   };
 

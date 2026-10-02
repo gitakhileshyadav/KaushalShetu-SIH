@@ -107,8 +107,8 @@ export const ScannerPage: React.FC = () => {
     }
   };
 
-  const handleScanSuccess = (decodedText: string) => {
-    const res = verifyAndMarkAttendance(decodedText);
+  const handleScanSuccess = async (decodedText: string) => {
+    const res = await verifyAndMarkAttendance(decodedText);
     setLastResult({
       success: res.success,
       message: res.message,

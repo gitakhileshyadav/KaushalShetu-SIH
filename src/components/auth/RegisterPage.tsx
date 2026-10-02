@@ -57,7 +57,7 @@ export const RegisterPage: React.FC = () => {
     'AMUL (GCMMF)'
   ];
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setSuccessMsg('');
@@ -83,37 +83,35 @@ export const RegisterPage: React.FC = () => {
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      const res = signUp({
-        username,
-        password,
-        fullName,
-        role,
-        institute,
-        mobileNumber: mobileNumber || '+91 98765 00000',
-        email: email || `${username.trim().toLowerCase()}@ncct.ac.in`,
-        qualification,
-        designation: designation || (role === 'trainer' ? 'Senior Faculty' : role === 'employer' ? 'HR Recruiter' : 'PACS Trainee Candidate'),
-        idProofType,
-        idProofNumber: idProofNumber || 'IND-REF-2026-X',
-        applicationReason: applicationReason || 'Applying for NCCT affiliated cooperative training and vocational certification.'
-      });
+    const res = await signUp({
+      username,
+      password,
+      fullName,
+      role,
+      institute,
+      mobileNumber: mobileNumber || '+91 98765 00000',
+      email: email || `${username.trim().toLowerCase()}@ncct.ac.in`,
+      qualification,
+      designation: designation || (role === 'trainer' ? 'Senior Faculty' : role === 'employer' ? 'HR Recruiter' : 'PACS Trainee Candidate'),
+      idProofType,
+      idProofNumber: idProofNumber || 'IND-REF-2026-X',
+      applicationReason: applicationReason || 'Applying for NCCT affiliated cooperative training and vocational certification.'
+    });
 
-      setIsLoading(false);
-      if (res.success) {
-        setSuccessMsg(res.message);
-        setTimeout(() => {
-          if (role === 'admin') {
-            navigateTo('admin');
-          } else {
-            // Trainee, Trainer, Employer go to pending or their desk
-            navigateTo(role);
-          }
-        }, 1200);
-      } else {
-        setErrorMsg(res.message);
-      }
-    }, 300);
+    setIsLoading(false);
+    if (res.success) {
+      setSuccessMsg(res.message);
+      setTimeout(() => {
+        if (role === 'admin') {
+          navigateTo('admin');
+        } else {
+          // Trainee, Trainer, Employer go to pending or their desk
+          navigateTo(role);
+        }
+      }, 1200);
+    } else {
+      setErrorMsg(res.message);
+    }
   };
 
   return (
