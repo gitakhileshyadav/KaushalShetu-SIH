@@ -1,6 +1,6 @@
-import { getClient } from './_lib/db';
-import { ensureSchema, seedIfEmpty } from './_lib/schema';
-import { json, Req, Res } from './_lib/reqres';
+import { getClient } from './_lib/db.js';
+import { ensureSchema, seedIfEmpty } from './_lib/schema.js';
+import { json, Req, Res } from './_lib/reqres.js';
 
 export default async function handler(req: Req, res: Res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
