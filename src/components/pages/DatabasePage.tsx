@@ -148,9 +148,9 @@ export const DatabasePage: React.FC = () => {
             </div>
           )}
 
-          {tursoConfig.errorMsg && tursoConfig.status === 'error' && (
-            <div className="p-4 rounded-xl text-xs bg-rose-50 text-rose-800 border border-rose-200 flex items-center space-x-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+          {tursoConfig.errorMsg && (
+            <div className="p-4 rounded-xl text-xs bg-amber-50 text-amber-800 border border-amber-200 flex items-center space-x-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
               <span>{tursoConfig.errorMsg}</span>
             </div>
           )}

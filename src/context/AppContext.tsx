@@ -87,6 +87,7 @@ interface AppContextType {
   // Server Sync Status
   tursoConfig: TursoConfig;
   syncNow: () => Promise<{ success: boolean; message: string }>;
+  refreshServer: () => Promise<void>;
 
   // Domain Data
   courses: Course[];
@@ -560,7 +561,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // refreshFromServer(): fetch all entities from the backend, replace local state,
   // mirror into the ${STORAGE_KEY}_* localStorage read-cache, and mark sync status.
-  const refreshFromServer = useCallback(async () => {
+  const refreshFromServer = useCallback(async (opts?: { silent?: boolean }) => {
     try {
       const snapshot = await fetchAllEntities();
 
@@ -618,10 +619,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         errorMsg: undefined
       }));
     } catch (err) {
-      if (err instanceof ApiError) {
-        setTursoConfig(prev => ({ ...prev, status: 'error', errorMsg: err.message }));
-      } else {
-        setTursoConfig(prev => ({ ...prev, status: 'offline' }));
+      if (!opts?.silent) {
+        if (err instanceof ApiError) {
+          setTursoConfig(prev => ({ ...prev, status: 'error', errorMsg: err.message }));
+        } else {
+          setTursoConfig(prev => ({ ...prev, status: 'offline' }));
+        }
       }
       // State stays as cached — no data loss.
     }
@@ -629,10 +632,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // persist(entity, records): the caller has already applied the optimistic local
   // update; this pushes the record(s) to the backend, queueing when offline.
+  // 401 (not signed in / expired session) is surfaced — never silently dropped.
   const persist = useCallback((entity: EntityName, records: any[]) => {
     upsertEntity(entity, records).catch((err) => {
       if (err instanceof OfflineQueuedError) {
         setTursoConfig(prev => ({ ...prev, pendingWrites: getPendingWrites() }));
+      } else if (err instanceof ApiError && err.status === 401) {
+        setTursoConfig(prev => ({
+          ...prev,
+          errorMsg: 'Sign in required to sync changes — your latest changes are saved on this device only. Use the Sign In page, then Sync Now.'
+        }));
       } else {
         console.warn(`[AppContext] Failed to persist ${entity}:`, err);
       }
@@ -755,6 +764,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cleanupSync();
     };
   }, [refreshFromServer, replayPendingScans]);
+
+  // Live sync: poll the server every 20s (only while the tab is visible) and
+  // refresh whenever the tab becomes visible again — so sessions, QR tokens,
+  // attendance, and approvals created on OTHER devices appear within seconds.
+  useEffect(() => {
+    const poll = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        refreshFromServer({ silent: true });
+      }
+    };
+    const interval = setInterval(poll, 20000);
+    document.addEventListener('visibilitychange', poll);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', poll);
+    };
+  }, [refreshFromServer]);
+
+  // Manual/live refresh exposed to components (e.g. refresh right when the QR
+  // scanner opens so trainees pick up freshly generated tokens immediately).
+  const refreshServer = useCallback(() => refreshFromServer({ silent: true }), [refreshFromServer]);
 
   // Current authenticated user
   const currentUser: UserProfile | null = allUsers.find(u => u.id === currentUserId) || null;
@@ -1640,6 +1670,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         tursoConfig,
         syncNow,
+        refreshServer,
 
         courses,
         enrollments,

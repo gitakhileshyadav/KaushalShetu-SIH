@@ -18,12 +18,13 @@ import {
 } from 'lucide-react';
 
 export const ScannerPage: React.FC = () => {
-  const { 
-    currentUser, 
-    verifyAndMarkAttendance, 
-    activeTokens, 
+  const {
+    currentUser,
+    verifyAndMarkAttendance,
+    activeTokens,
     navigateTo,
-    isAuthenticated 
+    isAuthenticated,
+    refreshServer
   } = useApp();
 
   const [scanMode, setScanMode] = useState<'camera' | 'upload' | 'manual'>('camera');
@@ -40,6 +41,12 @@ export const ScannerPage: React.FC = () => {
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const scannerContainerId = 'interactive-qr-reader-page';
+
+  // Refresh right when the scanner opens so freshly generated trainer
+  // tokens/sessions are picked up immediately.
+  useEffect(() => {
+    refreshServer();
+  }, []);
 
   // Active tokens list for quick test helper
   const availableActiveTokens: QRToken[] = Object.values(activeTokens);

@@ -19,7 +19,7 @@ interface QRScannerModalProps {
 }
 
 export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
-  const { verifyAndMarkAttendance, activeTokens, sessions, currentUser } = useApp();
+  const { verifyAndMarkAttendance, activeTokens, sessions, currentUser, refreshServer } = useApp();
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualToken, setManualToken] = useState<string>('');
@@ -34,6 +34,9 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
 
   // Cleanup scanner on unmount
   useEffect(() => {
+    // Refresh right when the scanner opens so freshly generated trainer
+    // tokens/sessions are picked up immediately.
+    refreshServer();
     return () => {
       if (html5QrCodeRef.current) {
         if (html5QrCodeRef.current.isScanning) {
