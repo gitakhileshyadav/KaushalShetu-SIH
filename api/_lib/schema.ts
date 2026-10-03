@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { Client } from '@libsql/client';
-import { getClient } from './db';
-import { ENTITIES, type EntityName } from './entities';
+import { getClient } from './db.js';
+import { ENTITIES, type EntityName } from './entities.js';
 import {
   INITIAL_USERS,
   INITIAL_COURSES,

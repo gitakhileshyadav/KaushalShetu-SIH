@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto';
-import { bearerToken, Req } from './reqres';
+import { bearerToken, Req } from './reqres.js';
 
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const SECRET = SESSION_SECRET || 'insecure-dev-secret-change-me';
