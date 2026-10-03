@@ -1,8 +1,8 @@
-import { dbUnavailable, getClient } from '../_lib/db.js';
-import { ensureSchema } from '../_lib/schema.js';
-import { ENTITIES, EntityConfig } from '../_lib/entities.js';
-import { getAuthUserId } from '../_lib/auth.js';
-import { json, Req, Res } from '../_lib/reqres.js';
+import { dbUnavailable, getClient } from './_lib/db.js';
+import { ensureSchema } from './_lib/schema.js';
+import { ENTITIES, EntityConfig } from './_lib/entities.js';
+import { getAuthUserId } from './_lib/auth.js';
+import { json, Req, Res } from './_lib/reqres.js';
 
 const SENSITIVE_ENTITIES: ReadonlySet<string> = new Set(['qr_tokens']);
 

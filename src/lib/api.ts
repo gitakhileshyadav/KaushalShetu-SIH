@@ -177,7 +177,7 @@ export async function authMe(): Promise<{ user: UserProfile }> {
 }
 
 async function fetchEntityRows<T>(entity: EntityName): Promise<T[]> {
-  const data = await apiFetch<{ rows: T[] }>(`/data/${entity}`);
+  const data = await apiFetch<{ rows: T[] }>(`/data?entity=${entity}`);
   return data.rows ?? [];
 }
 
@@ -231,7 +231,7 @@ export async function fetchAllEntities(): Promise<EntitySnapshot> {
 }
 
 async function rawUpsert(entity: EntityName, records: any[]): Promise<void> {
-  await apiFetch<{ upserted: number }>(`/data/${entity}`, {
+  await apiFetch<{ upserted: number }>(`/data?entity=${entity}`, {
     method: 'POST',
     body: { records },
   });
