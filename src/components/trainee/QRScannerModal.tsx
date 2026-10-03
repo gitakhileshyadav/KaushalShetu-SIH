@@ -19,7 +19,7 @@ interface QRScannerModalProps {
 }
 
 export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
-  const { verifyAndMarkAttendance, activeTokens, sessions, currentUser, refreshServer } = useApp();
+  const { verifyAndMarkAttendance, activeTokens, sessions, courses, currentUser, refreshServer } = useApp();
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualToken, setManualToken] = useState<string>('');
@@ -116,16 +116,22 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
     }
   };
 
-  // Get list of active tokens for easy 1-click test in demo mode
+  // Active tokens: one per session (latest wins). Enriched with course title and
+  // expiry so the trainee can pick the exact session they are present in.
   const tokenList = Object.values(activeTokens) as QRAttendanceToken[];
   const activeTokenList = tokenList.map(t => {
     const ses = sessions.find(s => s.id === t.sessionId);
+    const course = courses.find(c => c.id === t.courseId);
+    const sessionLabel = course && ses ? `${course.title} — ${ses.topic}` : ses?.topic || 'Active Session';
     return {
       token: t.token,
-      sessionTitle: ses?.topic || 'Active Session',
+      sessionLabel,
       isExpired: new Date() > new Date(t.expiresAt)
     };
   });
+
+  const [selectedToken, setSelectedToken] = useState<string>('');
+  const selectedEntry = activeTokenList.find(item => item.token === selectedToken);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
@@ -284,29 +290,34 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({ onClose }) => {
               </button>
             </div>
 
-            {/* Quick 1-click active tokens */}
+            {/* Session chooser: pick the session you are present in, then mark */}
             {activeTokenList.length > 0 && (
               <div className="mt-3 pt-2.5 border-t border-slate-200">
                 <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-1.5">
                   Available Active Session Tokens:
                 </p>
-                <div className="space-y-1">
+                <select
+                  value={selectedToken}
+                  onChange={e => {
+                    setSelectedToken(e.target.value);
+                    setManualToken(e.target.value);
+                  }}
+                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 cursor-pointer"
+                >
+                  <option value="">— Choose the session you are present in —</option>
                   {activeTokenList.map((item, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => {
-                        setManualToken(item.token);
-                        handleTokenSubmitted(item.token);
-                      }}
-                      className="w-full text-left p-1.5 bg-white hover:bg-indigo-50 border border-slate-200 rounded-md text-[11px] flex items-center justify-between transition cursor-pointer"
-                    >
-                      <span className="font-medium text-slate-700 truncate">{item.sessionTitle}</span>
-                      <span className="text-[10px] font-mono text-indigo-600 font-semibold shrink-0 ml-2 bg-indigo-50 px-1.5 py-0.5 rounded">
-                        1-Click Scan
-                      </span>
-                    </button>
+                    <option key={idx} value={item.token} disabled={item.isExpired}>
+                      {item.sessionLabel}{item.isExpired ? ' (expired)' : ''}
+                    </option>
                   ))}
-                </div>
+                </select>
+                <button
+                  onClick={() => handleTokenSubmitted(selectedToken)}
+                  disabled={!selectedToken || !!selectedEntry?.isExpired || isVerifying}
+                  className="w-full mt-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
+                >
+                  {isVerifying ? 'Verifying...' : 'Scan & Mark Attendance for Selected Session'}
+                </button>
               </div>
             )}
           </div>

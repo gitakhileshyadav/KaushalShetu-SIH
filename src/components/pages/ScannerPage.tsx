@@ -22,6 +22,8 @@ export const ScannerPage: React.FC = () => {
     currentUser,
     verifyAndMarkAttendance,
     activeTokens,
+    sessions,
+    courses,
     navigateTo,
     isAuthenticated,
     refreshServer
@@ -336,27 +338,33 @@ export const ScannerPage: React.FC = () => {
         <div className="mt-8 pt-6 border-t border-slate-100">
           <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span>Currently Active Session Tokens (Click to auto-fill)</span>
+            <span>Currently Active Session Tokens (Choose to auto-fill)</span>
           </div>
 
-          <div className="space-y-1.5">
-            {availableActiveTokens.map(t => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => {
-                  setManualToken(t.token);
-                  setScanMode('manual');
-                }}
-                className="w-full text-left p-2.5 bg-slate-50 hover:bg-indigo-50 rounded-xl border border-slate-200 hover:border-indigo-300 transition flex items-center justify-between text-xs cursor-pointer group"
-              >
-                <span className="font-mono text-slate-800 font-semibold group-hover:text-indigo-700 truncate">
-                  {t.token}
-                </span>
-                <span className="text-[10px] text-slate-400 shrink-0 ml-2">Click to paste</span>
-              </button>
-            ))}
-          </div>
+          <select
+            value={availableActiveTokens.some(t => t.token === manualToken) ? manualToken : ''}
+            onChange={e => {
+              setManualToken(e.target.value);
+              setScanMode('manual');
+            }}
+            className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 cursor-pointer"
+          >
+            <option value="">— Choose the session you are present in —</option>
+            {availableActiveTokens.map(t => {
+              const expired = new Date() > new Date(t.expiresAt);
+              const ses = sessions.find(s => s.id === t.sessionId);
+              const course = courses.find(c => c.id === t.courseId);
+              const label = course && ses ? `${course.title} — ${ses.topic}` : ses?.topic || 'Active Session';
+              return (
+                <option key={t.id} value={t.token} disabled={expired}>
+                  {label}{expired ? ' (expired)' : ''}
+                </option>
+              );
+            })}
+          </select>
+          <p className="text-[10px] text-slate-400 mt-1.5">
+            Selecting a session fills its token below — then press Validate Token & Mark Attendance.
+          </p>
         </div>
       </div>
     </div>
