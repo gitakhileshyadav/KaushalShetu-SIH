@@ -34,6 +34,7 @@ import {
 import {
   fetchAllEntities,
   upsertEntity,
+  enqueueWrite,
   OfflineQueuedError,
   ApiError,
   authLogin,
@@ -201,6 +202,18 @@ interface AppContextType {
 
 const STORAGE_KEY = 'ncct_coop_ecosystem_v1';
 const PENDING_SCANS_KEY = 'ncct_pending_scans';
+
+// Seeded demo accounts: their credentials are public (shown on the login page),
+// so auto-authenticating the demo state adds no new exposure. It makes the
+// demo's mutations (sessions, courses, QR tokens) sync to the server without
+// requiring an explicit sign-in first.
+const DEMO_CREDENTIALS: Record<string, string> = {
+  usr_trainer_1: 'trainer1',
+  usr_trainee_1: 'trainee1',
+  usr_admin_1: 'admin1',
+  usr_recruiter_1: 'recruiter1'
+};
+const DEMO_PASSWORD = 'password123';
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
@@ -638,9 +651,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (err instanceof OfflineQueuedError) {
         setTursoConfig(prev => ({ ...prev, pendingWrites: getPendingWrites() }));
       } else if (err instanceof ApiError && err.status === 401) {
+        // Not authenticated (or token expired): queue the write so it survives
+        // refreshes and replays after sign-in — never dropped silently.
+        enqueueWrite(entity, records);
         setTursoConfig(prev => ({
           ...prev,
-          errorMsg: 'Sign in required to sync changes — your latest changes are saved on this device only. Use the Sign In page, then Sync Now.'
+          pendingWrites: getPendingWrites(),
+          errorMsg: 'Sign in required to sync changes — your changes are saved on this device and will sync after sign in.'
         }));
       } else {
         console.warn(`[AppContext] Failed to persist ${entity}:`, err);
@@ -738,6 +755,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let isMounted = true;
 
     const init = async () => {
+      // Demo auto-auth: the default demo state (e.g. usr_trainer_1) gets a real
+      // session token silently, so trainer-created sessions/tokens sync to the
+      // server without an explicit sign-in. Real accounts sign in themselves.
+      const demoUsername = DEMO_CREDENTIALS[currentUserId ?? ''];
+      if (!getToken() && demoUsername) {
+        try {
+          const res = await authLogin(demoUsername, DEMO_PASSWORD);
+          setToken(res.token);
+        } catch {
+          // Demo auth unavailable — mutations will surface the 401 notice.
+        }
+      }
+
       try {
         const health = await healthCheck();
         if (!isMounted) return;
@@ -807,6 +837,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         return [res.user, ...prev];
       });
+
+      // Recover anything queued before this sign-in (writes made while
+      // unauthenticated, offline scans), then pull the latest server state.
+      replayPendingWrites().catch(() => {});
+      replayPendingScans().catch(() => {});
+      refreshFromServer({ silent: true });
 
       return {
         success: true,

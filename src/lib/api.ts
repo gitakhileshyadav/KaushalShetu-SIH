@@ -313,6 +313,11 @@ export async function replayPendingWrites(): Promise<number> {
     try {
       await rawUpsert(next.entity, next.records);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        // Not authenticated yet (or token expired) — retryable after sign-in.
+        // Keep the item queued and stop; never dead-letter user data on 401.
+        return replayed;
+      }
       if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
         writeQueue(readQueue().slice(1));
         continue;
