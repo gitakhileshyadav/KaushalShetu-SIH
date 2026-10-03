@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Course } from '../../types';
+import { CourseNotesModal } from '../trainer/CourseNotesModal';
 import { 
   BookOpen, 
   CheckCircle2, 
@@ -16,7 +17,8 @@ import {
   ChevronDown,
   ChevronUp,
   Percent,
-  Calendar
+  Calendar,
+  Pencil
 } from 'lucide-react';
 
 export const AdminCourseApprovals: React.FC = () => {
@@ -27,6 +29,7 @@ export const AdminCourseApprovals: React.FC = () => {
   const [expandedCourseId, setExpandedCourseId] = useState<string | null>(null);
   const [rejectingCourseId, setRejectingCourseId] = useState<string | null>(null);
   const [rejectReasonInput, setRejectReasonInput] = useState('');
+  const [editingCourse, setEditingCourse] = useState<Course | null>(null);
 
   const pendingCourses = courses.filter(c => c.approvalStatus === 'pending_approval');
   const approvedCourses = courses.filter(c => c.approvalStatus === 'approved');
@@ -238,6 +241,15 @@ export const AdminCourseApprovals: React.FC = () => {
                   {/* Right actions */}
                   <div className="flex flex-wrap items-center gap-2 shrink-0 self-end md:self-center">
                     <button
+                      onClick={() => setEditingCourse(course)}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition flex items-center space-x-1.5 cursor-pointer shadow-xs"
+                      title="Edit or delete videos, PDFs, lessons, and notes"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>Edit Content</span>
+                    </button>
+
+                    <button
                       onClick={() => openClassroom(course.id)}
                       className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-xl text-xs transition flex items-center space-x-1.5 cursor-pointer shadow-xs"
                       title="Inspect syllabus videos & PDF reader in platform"
@@ -374,6 +386,18 @@ export const AdminCourseApprovals: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Admin Content Desk: edit/delete any course material (videos, PDFs, lessons, notes) */}
+      {editingCourse && (() => {
+        const liveCourse = courses.find(c => c.id === editingCourse.id) || editingCourse;
+        return (
+          <CourseNotesModal
+            course={liveCourse}
+            canEditContent={true}
+            onClose={() => setEditingCourse(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

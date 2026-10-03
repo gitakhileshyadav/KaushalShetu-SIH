@@ -116,6 +116,10 @@ interface AppContextType {
   updateCourseNotes: (courseId: string, notes: string) => void;
   addCourseResource: (courseId: string, resource: { title: string; type: 'pdf' | 'notes' | 'document' | 'video'; url: string; summary?: string }) => void;
   addCourseLesson: (courseId: string, lesson: Omit<CourseLesson, 'id'>) => void;
+  updateCourseResource: (courseId: string, resourceId: string, data: Partial<CourseResourceItem>) => void;
+  deleteCourseResource: (courseId: string, resourceId: string) => void;
+  updateCourseLesson: (courseId: string, lessonId: string, data: Partial<CourseLesson>) => void;
+  deleteCourseLesson: (courseId: string, lessonId: string) => void;
 
   // Trainee Admission
   requestAdmission: (courseId: string, notes?: string, customTraineeId?: string) => { success: boolean; message: string };
@@ -1196,6 +1200,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Admin content override: edit/delete any course material (resources, lessons)
+  const updateCourseResource = (courseId: string, resourceId: string, data: Partial<CourseResourceItem>) => {
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      resources: (target.resources || []).map(r => r.id === resourceId ? { ...r, ...data } : r)
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
+  };
+
+  const deleteCourseResource = (courseId: string, resourceId: string) => {
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      resources: (target.resources || []).filter(r => r.id !== resourceId)
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
+  };
+
+  const updateCourseLesson = (courseId: string, lessonId: string, data: Partial<CourseLesson>) => {
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      modules: (target.modules || []).map(m => m.id === lessonId ? { ...m, ...data } : m)
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
+  };
+
+  const deleteCourseLesson = (courseId: string, lessonId: string) => {
+    const target = courses.find(c => c.id === courseId);
+    if (!target) return;
+    const updated: Course = {
+      ...target,
+      modules: (target.modules || []).filter(m => m.id !== lessonId)
+    };
+    setCourses(prev => prev.map(c => c.id === courseId ? updated : c));
+    persist('courses', [updated]);
+  };
+
   // 2. Trainee Admission Requests
   const requestAdmission = (courseId: string, notes?: string, customTraineeId?: string): { success: boolean; message: string } => {
     const trainee = customTraineeId ? allUsers.find(u => u.id === customTraineeId) : currentUser;
@@ -1722,6 +1771,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateCourseNotes,
         addCourseResource,
         addCourseLesson,
+        updateCourseResource,
+        deleteCourseResource,
+        updateCourseLesson,
+        deleteCourseLesson,
 
         requestAdmission,
         decideAdmission,

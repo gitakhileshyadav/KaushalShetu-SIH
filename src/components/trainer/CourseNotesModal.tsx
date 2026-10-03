@@ -1,29 +1,41 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Course } from '../../types';
-import { 
-  X, 
-  FileText, 
-  Save, 
-  Plus, 
-  PlayCircle, 
-  ExternalLink, 
-  CheckCircle2, 
-  BookOpen, 
-  ShieldCheck, 
+import { Course, CourseResourceItem, CourseLesson } from '../../types';
+import {
+  X,
+  FileText,
+  Save,
+  Plus,
+  PlayCircle,
+  ExternalLink,
+  CheckCircle2,
+  BookOpen,
+  ShieldCheck,
   Sparkles,
   Link,
   Layers,
-  Clock
+  Clock,
+  Pencil,
+  Trash2
 } from 'lucide-react';
 
 interface CourseNotesModalProps {
   course: Course;
   onClose: () => void;
+  canEditContent?: boolean;
 }
 
-export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onClose }) => {
-  const { updateCourseNotes, addCourseResource, addCourseLesson, openClassroom } = useApp();
+export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onClose, canEditContent = false }) => {
+  const {
+    updateCourseNotes,
+    addCourseResource,
+    addCourseLesson,
+    updateCourseResource,
+    deleteCourseResource,
+    updateCourseLesson,
+    deleteCourseLesson,
+    openClassroom
+  } = useApp();
 
   const [activeTab, setActiveTab] = useState<'notes' | 'resources' | 'lessons'>('notes');
   const [notesText, setNotesText] = useState(course.notes || '');
@@ -43,6 +55,19 @@ export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onCl
   const [lessonDuration, setLessonDuration] = useState('15');
   const [lessonPdfTitle, setLessonPdfTitle] = useState('');
   const [lessonPdfUrl, setLessonPdfUrl] = useState('');
+
+  // Admin inline edit states (resources)
+  const [editingResourceId, setEditingResourceId] = useState<string | null>(null);
+  const [editResourceTitle, setEditResourceTitle] = useState('');
+  const [editResourceUrl, setEditResourceUrl] = useState('');
+  const [editResourceType, setEditResourceType] = useState<CourseResourceItem['type']>('pdf');
+
+  // Admin inline edit states (lessons)
+  const [editingLessonId, setEditingLessonId] = useState<string | null>(null);
+  const [editLessonTitle, setEditLessonTitle] = useState('');
+  const [editLessonYoutubeId, setEditLessonYoutubeId] = useState('');
+  const [editLessonDuration, setEditLessonDuration] = useState('15');
+  const [editLessonDescription, setEditLessonDescription] = useState('');
 
   const handleSaveNotes = (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,6 +114,44 @@ export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onCl
     setShowAddLesson(false);
   };
 
+  const startEditResource = (res: CourseResourceItem) => {
+    setEditingResourceId(res.id);
+    setEditResourceTitle(res.title);
+    setEditResourceUrl(res.url);
+    setEditResourceType(res.type);
+  };
+
+  const handleUpdateResource = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingResourceId || !editResourceTitle.trim()) return;
+    updateCourseResource(course.id, editingResourceId, {
+      title: editResourceTitle.trim(),
+      url: editResourceUrl.trim(),
+      type: editResourceType
+    });
+    setEditingResourceId(null);
+  };
+
+  const startEditLesson = (m: CourseLesson) => {
+    setEditingLessonId(m.id);
+    setEditLessonTitle(m.title);
+    setEditLessonYoutubeId(m.youtubeVideoId);
+    setEditLessonDuration(String(m.durationMinutes));
+    setEditLessonDescription(m.description);
+  };
+
+  const handleUpdateLesson = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingLessonId || !editLessonTitle.trim()) return;
+    updateCourseLesson(course.id, editingLessonId, {
+      title: editLessonTitle.trim(),
+      youtubeVideoId: editLessonYoutubeId.trim(),
+      durationMinutes: parseInt(editLessonDuration, 10) || 15,
+      description: editLessonDescription.trim()
+    });
+    setEditingLessonId(null);
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
       <div className="bg-white rounded-3xl max-w-3xl w-full shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 my-8">
@@ -96,8 +159,12 @@ export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onCl
         <div className="bg-slate-900 p-6 text-white flex items-start justify-between">
           <div>
             <div className="flex items-center space-x-2">
-              <span className="bg-amber-400 text-slate-950 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider">
-                Trainer Content & Notes Desk
+              <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider ${
+                canEditContent
+                  ? 'bg-rose-400 text-slate-950'
+                  : 'bg-amber-400 text-slate-950'
+              }`}>
+                {canEditContent ? 'Admin Content Desk (Apex Override)' : 'Trainer Content & Notes Desk'}
               </span>
               <span className="text-xs text-indigo-300 font-mono font-bold">{course.code}</span>
             </div>
@@ -294,20 +361,98 @@ export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onCl
               <div className="space-y-2">
                 {course.resources && course.resources.length > 0 ? (
                   course.resources.map(res => (
-                    <div key={res.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-8 h-8 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center font-bold">
-                          PDF
+                    editingResourceId === res.id ? (
+                      <form key={res.id} onSubmit={handleUpdateResource} className="p-3 bg-indigo-50 rounded-xl border border-indigo-300 space-y-2.5">
+                        <h5 className="text-xs font-bold text-indigo-900 flex items-center space-x-1.5">
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>Edit Resource</span>
+                        </h5>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Title *</label>
+                            <input
+                              type="text"
+                              required
+                              value={editResourceTitle}
+                              onChange={e => setEditResourceTitle(e.target.value)}
+                              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Document Type</label>
+                            <select
+                              value={editResourceType}
+                              onChange={e => setEditResourceType(e.target.value as CourseResourceItem['type'])}
+                              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500"
+                            >
+                              <option value="pdf">Standard PDF Document</option>
+                              <option value="sop">Official SOP Manual</option>
+                              <option value="manual">Training Manual</option>
+                              <option value="reference">Statutory Reference</option>
+                            </select>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block text-[11px] font-semibold text-slate-600 mb-1">PDF URL / Link</label>
+                            <input
+                              type="url"
+                              value={editResourceUrl}
+                              onChange={e => setEditResourceUrl(e.target.value)}
+                              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 font-mono"
+                            />
+                          </div>
                         </div>
-                        <div>
-                          <p className="font-bold text-slate-800">{res.title}</p>
-                          <p className="text-slate-400 font-mono text-[11px]">Type: {res.type.toUpperCase()}</p>
+                        <div className="flex justify-end space-x-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingResourceId(null)}
+                            className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded-lg cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            className="px-4 py-1.5 bg-indigo-600 text-white font-bold rounded-xl text-xs hover:bg-indigo-700 cursor-pointer"
+                          >
+                            Save Changes
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div key={res.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-8 h-8 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center font-bold">
+                            PDF
+                          </div>
+                          <div>
+                            <p className="font-bold text-slate-800">{res.title}</p>
+                            <p className="text-slate-400 font-mono text-[11px]">Type: {res.type.toUpperCase()}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2 shrink-0">
+                          {canEditContent && (
+                            <>
+                              <button
+                                onClick={() => startEditResource(res)}
+                                className="px-2.5 py-1 bg-white hover:bg-indigo-50 border border-slate-300 hover:border-indigo-400 text-slate-700 rounded-lg font-semibold transition flex items-center space-x-1 cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                                <span>Edit</span>
+                              </button>
+                              <button
+                                onClick={() => deleteCourseResource(course.id, res.id)}
+                                className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 rounded-lg font-semibold transition flex items-center space-x-1 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>Delete</span>
+                              </button>
+                            </>
+                          )}
+                          <span className="text-emerald-600 font-semibold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            In-Platform Embedded
+                          </span>
                         </div>
                       </div>
-                      <span className="text-emerald-600 font-semibold text-[11px] bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                        In-Platform Embedded
-                      </span>
-                    </div>
+                    )
                   ))
                 ) : (
                   <div className="p-6 text-center text-slate-400 text-xs border border-dashed border-slate-200 rounded-2xl">
@@ -415,26 +560,111 @@ export const CourseNotesModal: React.FC<CourseNotesModalProps> = ({ course, onCl
 
               <div className="space-y-2">
                 {course.modules?.map((m, idx) => (
-                  <div key={m.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
-                    <div className="flex items-center space-x-3">
-                      <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
-                        {idx + 1}
+                  editingLessonId === m.id ? (
+                    <form key={m.id} onSubmit={handleUpdateLesson} className="p-3 bg-indigo-50 rounded-xl border border-indigo-300 space-y-2.5">
+                      <h5 className="text-xs font-bold text-indigo-900 flex items-center space-x-1.5">
+                        <Pencil className="w-3.5 h-3.5" />
+                        <span>Edit Lesson Module</span>
+                      </h5>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">Lesson Title *</label>
+                          <input
+                            type="text"
+                            required
+                            value={editLessonTitle}
+                            onChange={e => setEditLessonTitle(e.target.value)}
+                            className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">YouTube Video ID</label>
+                          <input
+                            type="text"
+                            value={editLessonYoutubeId}
+                            onChange={e => setEditLessonYoutubeId(e.target.value)}
+                            placeholder="e.g. 9bZkp7q19f0 (11 chars)"
+                            className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">Duration (Minutes)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={editLessonDuration}
+                            onChange={e => setEditLessonDuration(e.target.value)}
+                            className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1">Description / Key Points</label>
+                          <textarea
+                            rows={2}
+                            value={editLessonDescription}
+                            onChange={e => setEditLessonDescription(e.target.value)}
+                            className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
                       </div>
-                      <div>
-                        <p className="font-bold text-slate-800">{m.title}</p>
-                        <p className="text-slate-400 font-mono text-[11px]">
-                          YouTube ID: {m.youtubeVideoId} • {m.durationMinutes} mins
-                        </p>
+                      <div className="flex justify-end space-x-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditingLessonId(null)}
+                          className="px-3 py-1 text-xs text-slate-600 hover:bg-slate-200 rounded-lg cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-4 py-1.5 bg-indigo-600 text-white font-bold rounded-xl text-xs hover:bg-indigo-700 cursor-pointer"
+                        >
+                          Save Changes
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div key={m.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
+                          {idx + 1}
+                        </div>
+                        <div>
+                          <p className="font-bold text-slate-800">{m.title}</p>
+                          <p className="text-slate-400 font-mono text-[11px]">
+                            YouTube ID: {m.youtubeVideoId} • {m.durationMinutes} mins
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-2 shrink-0">
+                        {canEditContent && (
+                          <>
+                            <button
+                              onClick={() => startEditLesson(m)}
+                              className="px-2.5 py-1 bg-white hover:bg-indigo-50 border border-slate-300 hover:border-indigo-400 text-slate-700 rounded-lg font-semibold transition flex items-center space-x-1 cursor-pointer"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              <span>Edit</span>
+                            </button>
+                            <button
+                              onClick={() => deleteCourseLesson(course.id, m.id)}
+                              className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 rounded-lg font-semibold transition flex items-center space-x-1 cursor-pointer"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Delete</span>
+                            </button>
+                          </>
+                        )}
+                        <button
+                          onClick={() => openClassroom(course.id)}
+                          className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs transition flex items-center space-x-1 cursor-pointer"
+                        >
+                          <PlayCircle className="w-3.5 h-3.5" />
+                          <span>Preview</span>
+                        </button>
                       </div>
                     </div>
-                    <button
-                      onClick={() => openClassroom(course.id)}
-                      className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs transition flex items-center space-x-1 cursor-pointer"
-                    >
-                      <PlayCircle className="w-3.5 h-3.5" />
-                      <span>Preview</span>
-                    </button>
-                  </div>
+                  )
                 ))}
               </div>
             </div>
