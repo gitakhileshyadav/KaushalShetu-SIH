@@ -7,4 +7,4 @@ coverage/
 .env*
 !.env.example
 .vercel
-docs/README.full.md
+docs/
